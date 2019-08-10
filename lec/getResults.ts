@@ -13,8 +13,8 @@ interface IGameData {
   turret: IFirstObjective;
   herald: IFirstObjective;
   baron: IFirstObjective;
-  blueWin: boolean
-  redWin: boolean
+  blueWin: boolean;
+  redWin: boolean;
 }
 
 type TObjective = "blood" | "turret" | "dragon" | "baron" | "herald";
@@ -38,77 +38,100 @@ const getGameDate = async (page: puppeteer.Page): Promise<{ date: Moment }> => {
   return { date: moment(date, "M/D/YYYY") };
 };
 
-
-const getWinLose = async (page: puppeteer.Page): Promise<{ blueWin: boolean, redWin: boolean }> => {
-  const [blueRes, redRes] = await page.$$eval(".game-conclusion", (_el: Element[]) => {
-    const el = _el as HTMLDivElement[];
-    return [el[0].innerText.trim(), el[1].innerText.trim()];
-  });
-
-  return {
-    blueWin: blueRes.includes("VICTORY"),
-    redWin: redRes.includes("VICTORY"),
-  }
-};
-
-const getFirstBlood = async (
+const getWinLose = async (
   page: puppeteer.Page
-): Promise<IFirstObjective> => {
-  const firstObjective = await page.$$eval<IFirstObjective>(
-    "circle",
-    (_els: Element[]) => {
-      const els = _els as SVGCircleElement[];
-
-      const first = els.reduce<SVGCircleElement | null>((acc, circle) => {
-        if (!circle.className.baseVal.includes("point kills")) {
-          return acc;
-        }
-
-        if (!acc) {
-          // found the first candidate
-
-          if (circle.className.baseVal.includes("point kills")) {
-            return circle;
-          }
-
-          return null;
-        }
-
-        if (circle.cx.baseVal < acc.cx.baseVal) {
-          return circle;
-        }
-
-        return acc;
-      }, null);
-
-      if (!first) {
-        return {
-          team: null,
-          objective: "blood"
-        };
-      }
-
-      return {
-        team: first
-          ? first.className.baseVal.includes("100")
-            ? "blue"
-            : "red"
-          : null,
-        objective: "blood"
-      };
+): Promise<{ blueWin: boolean; redWin: boolean }> => {
+  const [blueRes, redRes] = await page.$$eval(
+    ".game-conclusion",
+    (_el: Element[]) => {
+      const el = _el as HTMLDivElement[];
+      return [el[0].innerText.trim(), el[1].innerText.trim()];
     }
   );
 
-  return firstObjective
+  return {
+    blueWin: blueRes.includes("VICTORY"),
+    redWin: redRes.includes("VICTORY")
+  };
 };
 
+interface ITeamChampions {
+  blue: string[];
+  red: string[];
+}
+
+const getTeamChamptions = (page: puppeteer.Page): Promise<ITeamChampions> => {
+  return page.$$eval<ITeamChampions>(
+    ".champion-col.name .champion-nameplate img",
+    (_els: Element[]): ITeamChampions => {
+      const els = (_els as HTMLImageElement[]).map(x => x.src);
+
+      return {
+        blue: [...els.slice(0, 5), "https://matchhistory.na.leagueoflegends.com/assets/1.0.38/images/normal/event_icons/minion_100.png"],
+        red: [...els.slice(5, 10), "https://matchhistory.na.leagueoflegends.com/assets/1.0.38/images/normal/event_icons/minion_200.png"]
+      };
+    }
+  );
+};
+
+const getFirst = async (
+  page: puppeteer.Page,
+  objective: "blood" | "turret",
+  teams: ITeamChampions
+): Promise<IFirstObjective> => {
+  await page.evaluate(`
+      window['objective'] = '${objective}'
+  `);
+
+  const firstBloodSecurer = await page.$$eval<string>(
+    ".breakdown-card",
+    (_els: Element[]) => {
+      const text: string[] =
+        objective === "blood"
+          ? ["First Blood", "Erstes Blut"]
+          : ["First Tower", "Erster Turm"];
+
+      const els = (_els as HTMLDivElement[]).filter(x => {
+        return text.some(t => x.innerText.includes(t))
+      });
+      const killerEl = els[0];
+
+      if (els.length !== 1 || !killerEl) {
+        throw new Error(`Something went wrong finding first ${objective}`);
+      }
+
+      const killer = killerEl.querySelector<HTMLImageElement>(".killer img");
+
+      if (!killer) {
+        throw new Error(`Something went wrong finding first ${objective}`);
+      }
+
+      return killer.src;
+    }
+  );
+
+  if (teams.blue.includes(firstBloodSecurer)) {
+    return {
+      objective,
+      team: "blue"
+    };
+  }
+
+  if (teams.red.includes(firstBloodSecurer)) {
+    return {
+      objective,
+      team: "red"
+    };
+  }
+
+  throw new Error(`No first ${objective}`);
+};
 
 const getFirstObjective = async (
   page: puppeteer.Page,
   objective: TObjective
 ): Promise<IFirstObjective> => {
-
-  page.evaluate(`
+  await page.evaluate(`
       window['objective'] = '${objective}'
   `);
 
@@ -116,28 +139,16 @@ const getFirstObjective = async (
     "image",
     (_images: Element[]) => {
       const images = _images as SVGImageElement[];
+      const objectImages = images.filter(x =>
+        x.href.baseVal.includes(`${objective}_`)
+      );
 
-      const first = images.reduce<SVGImageElement | null>((acc, image) => {
-        if (!image.href.baseVal.includes(`${objective}_`)) {
-          return acc;
-        }
-
-        if (!acc) {
-          // found the first candidate
-
-          if (image.href.baseVal.includes(`${objective}_`)) {
-            return image;
-          }
-
-          return null;
-        }
-
-        if (image.x.baseVal < acc.x.baseVal) {
+      const first = objectImages.reduce<SVGImageElement>((acc, image) => {
+        if (image.x.baseVal.value < acc.x.baseVal.value) {
           return image;
         }
-
         return acc;
-      }, null);
+      }, objectImages[0]);
 
       if (!first) {
         return {
@@ -203,8 +214,6 @@ const appendToCsv = (data: IGameData): void => {
     return data.teams.blueTeam;
   };
 
-
-
   fs.appendFileSync("games.csv", "\n");
 
   fs.appendFileSync(
@@ -224,7 +233,7 @@ const appendToCsv = (data: IGameData): void => {
   );
 };
 
-const getResults = async (matchHistoryLink: string) => {
+const getResults = async (matchHistoryLink: string): Promise<IGameData> => {
   const browser: puppeteer.Browser = await puppeteer.launch({
     ...options,
     headless: true
@@ -251,13 +260,15 @@ const getResults = async (matchHistoryLink: string) => {
   // TODO: individual instance for each market, do them all at the same time, 5x faster
   const teams = await getTeams(page);
 
+  const champions = await getTeamChamptions(page);
+
   // unfortunately blood is not a <image> but a circle so it has it's own function
-  const blood = await getFirstBlood(page);
-  const turret = await getFirstObjective(page, "turret");
+  const blood = await getFirst(page, "blood", champions);
+  const turret = await getFirst(page, "turret", champions);
   const dragon = await getFirstObjective(page, "dragon");
   const herald = await getFirstObjective(page, "herald");
   const baron = await getFirstObjective(page, "baron");
-  const { blueWin, redWin } = await getWinLose(page)
+  const { blueWin, redWin } = await getWinLose(page);
 
   const { date } = await getGameDate(page);
 
@@ -273,14 +284,19 @@ const getResults = async (matchHistoryLink: string) => {
     redWin
   };
 
-  appendToCsv(gameData)
 
   await browser.close();
+
+  appendToCsv(gameData)
+
+  return gameData;
 };
 
-(async () => {
-  await getResults(
-    "https://matchhistory.na.leagueoflegends.com/en/#match-details/ESPORTSTMNT04/990663?gameHash=31d15a7905470d96"
-    // "https://matchhistory.na.leagueoflegends.com/en/#match-details/ESPORTSTMNT04/990638?gameHash=f5ea274ad9ef38ef&tab=overview"
-  );
-})();
+export { getResults };
+
+// (async () => {
+//   await getResults(
+//     "https://matchhistory.na.leagueoflegends.com/en/#match-details/ESPORTSTMNT04/990663?gameHash=31d15a7905470d96"
+//     // "https://matchhistory.na.leagueoflegends.com/en/#match-details/ESPORTSTMNT04/990638?gameHash=f5ea274ad9ef38ef&tab=overview"
+//   );
+// })();
